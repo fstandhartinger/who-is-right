@@ -59,7 +59,6 @@ def client_ip(scope):
 
 @asynccontextmanager
 async def lifespan(app):
-    if not os.getenv("GOOGLE_API_KEY"): raise RuntimeError("GOOGLE_API_KEY missing")
     yield
 
 app=FastAPI(lifespan=lifespan)
@@ -107,6 +106,8 @@ async def live(ws:WebSocket):
     if refusal:
         await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
     started=time.monotonic()
+    if not os.getenv("GOOGLE_API_KEY"):
+        await ws.send_json({"type":"error","message":"The referee is off duty. Please try later."}); await limits.leave(); await ws.close(code=1011); return
     try:
       url="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key="+os.environ["GOOGLE_API_KEY"]
       async with connect(url,max_size=8_000_000) as session:

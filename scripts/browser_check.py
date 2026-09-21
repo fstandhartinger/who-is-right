@@ -27,7 +27,11 @@ async def main():
       await page.screenshot(path=str(OUT/"desktop.png"),full_page=True)
       if WAV:
         await page.get_by_role("button",name="START LISTENING").click()
-        await page.wait_for_function("!document.querySelector('#score').textContent.includes('READY')",timeout=45000)
+        # A long utterance can legitimately show an intermediate NO CHECKABLE
+        # CLAIM before a later complete clause gets its verdict. Let the whole
+        # recording and backend pause window finish before asserting the final UI.
+        await page.wait_for_timeout(18000)
+        await page.wait_for_function("!document.querySelector('#score').textContent.includes('READY')",timeout=30000)
         print("LIVE_VERDICT",await page.locator("#score").inner_text())
         await page.screenshot(path=str(OUT/"live-verdict.png"),full_page=True)
       await page.set_viewport_size({"width":390,"height":844})

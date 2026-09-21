@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Who Is Right?!</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+  <header><div class="logo">WHO IS <span>RIGHT?!</span></div><div class="model" id="model">Checking referee…</div></header>
+  <section class="hero">
+    <div class="burst">LIVE<br>ARGUMENT<br>REFEREE!</div>
+    <div class="bubble" id="bubble">Say something checkable.<br><small>“The Eiffel Tower is in Rome.”</small></div>
+  </section>
+  <section class="machine" aria-label="truth gauge">
+    <div class="labels"><b>FALSE</b><b>¯\_(ツ)_/¯</b><b>TRUE</b></div>
+    <div class="gauge"><div class="ticks"></div><div class="needle" id="needle"></div><div class="pin"></div></div>
+    <div class="score" id="score">READY-ish</div><div class="confidence" id="confidence">Confidence appears after a check</div>
+  </section>
+  <section class="controls">
+    <button id="start"><span>🎙️</span> START LISTENING</button><button id="stop" hidden>■ STOP THE ARGUMENT</button>
+    <div class="timer" id="timer">03:00 max • 3 sessions / IP / day</div>
+    <div class="status" id="status">Microphone stays off until you tap.</div>
+  </section>
+  <section class="tape"><b>PARTY DEMO, NOT A FACT AUTHORITY.</b> It can be confidently wrong. Opinions get no verdict. Nobody “wins.”</section>
+  <footer><span>🔒 Audio is processed live only — never recorded or stored.</span><span>Gemini listens → Jev checks one claim</span><a href="https://github.com/fstandhartinger/who-is-right" target="_blank">MIT source ↗</a></footer>
+</main><script src="/app.js"></script></body></html>

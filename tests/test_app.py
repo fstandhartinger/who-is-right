@@ -33,13 +33,30 @@ def test_chunked_transcript_becomes_one_complete_utterance():
     assembler.add(" it was buil",at=1.6)
     assembler.add("t in 1950",at=1.8)
     assert not assembler.ready(at=2.0)
-    assert assembler.ready(at=3.3)
+    assert not assembler.ready(at=3.3)
+    assert assembler.ready(at=4.3)
     utterance=assembler.flush()
     assert utterance == "The Eiffel Tower is in Berlin, I'm sure, it was built in 1950"
     assert app.claim_candidates(utterance) == ["The Eiffel Tower is in Berlin","The Eiffel Tower was built in 1950"]
 
 def test_fragment_is_not_a_claim_candidate():
     assert app.claim_candidates('" equals 2"') == []
+    assert app.claim_candidates("are driving on the street.") == []
+
+def test_recorded_session_pauses_do_not_emit_connectors_or_mid_thought_fragments():
+    """Timing/chunks copied from Florian's 19:05 UTC debug recording."""
+    assembler=app.UtteranceAssembler()
+    for at,text in [(9.950," and"),(10.432," pla"),(10.592,"in"),(10.741,"s of"),
+                    (11.106," ly"),(11.279,"ing"),(11.354," in"),(11.529," the"),
+                    (11.712," air")]: assembler.add(text,at=at)
+    assert not assembler.ready(at=13.112)  # old 1.35 s boundary fired here
+    assembler.add(" and",at=13.824)
+    assert not assembler.ready(at=15.225)  # old code emitted just "and"
+    assembler.add(" a ca",at=15.745); assembler.add("t is",at=16.020)
+    assembler.add(" an",at=16.666); assembler.add(" animal",at=16.825)
+    assert not assembler.ready(at=18.125)
+    assert assembler.ready(at=19.3)
+    assert assembler.flush() == "and plains of lying in the air and a cat is an animal"
 
 def test_debug_requires_exact_nonempty_token(monkeypatch):
     monkeypatch.setattr(app,"DEBUG_TOKEN","secret-token")

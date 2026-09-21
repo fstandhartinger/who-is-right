@@ -20,7 +20,8 @@ GLOBAL_JEV_CALLS_DAY = int(os.getenv("GLOBAL_JEV_CALLS_DAY", "300"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "5"))
 SEARCHES_PER_SESSION = int(os.getenv("SEARCHES_PER_SESSION", "8"))
 SEARCHES_PER_DAY = int(os.getenv("SEARCHES_PER_DAY", "200"))
-UTTERANCE_PAUSE_SECONDS = float(os.getenv("UTTERANCE_PAUSE_SECONDS", "1.35"))
+UTTERANCE_PAUSE_SECONDS = float(os.getenv("UTTERANCE_PAUSE_SECONDS", "2.40"))
+PUNCTUATION_SETTLE_SECONDS = float(os.getenv("PUNCTUATION_SETTLE_SECONDS", "0.55"))
 ROLLING_SECONDS = 30
 DEBUG_RETENTION_SECONDS = 48 * 3600
 DEBUG_DIR = Path(os.getenv("DEBUG_LOG_DIR", "/tmp/who-is-right-debug"))
@@ -97,7 +98,15 @@ class UtteranceAssembler:
         self.history.append((at,text))
         while self.history and at-self.history[0][0] > self.rolling_seconds: self.history.popleft()
     def ready(self,at=None):
-        return bool(self.pending and (at or time.monotonic())-self.last_chunk_at >= UTTERANCE_PAUSE_SECONDS)
+        if not self.pending: return False
+        elapsed=(at or time.monotonic())-self.last_chunk_at
+        joined="".join(self.pending).strip()
+        # Gemini often pauses for 1-2 seconds mid-thought and can even emit a
+        # connector as a standalone delta. Punctuation is a strong boundary;
+        # otherwise wait for a genuinely conversational pause.
+        if joined.lower() in {"and","but","or","so","because"}: return False
+        punctuated=bool(re.search(r"[.!?][\"'”]?$",joined))
+        return (punctuated and elapsed >= PUNCTUATION_SETTLE_SECONDS) or elapsed >= UTTERANCE_PAUSE_SECONDS
     def flush(self):
         text="".join(self.pending); self.pending=[]
         text=re.sub(r"\s+([,.;!?])",r"\1",text); text=re.sub(r"([,.;!?])(\w)",r"\1 \2",text)
@@ -109,6 +118,10 @@ def claim_candidates(utterance):
     # supplying the complete utterance and rolling context to every judgment.
     pieces=re.split(r"(?<=[.!?])\s+|\s*(?:;|\b(?:but|and)\b)\s*|,\s*(?=(?:I|you|he|she|it|we|they|there)\b)",utterance,flags=re.I)
     candidates=[p.strip(" ,.;\"'“”") for p in pieces if len(p.strip(" ,.;\"'“”").split()) >= 3]
+    # Do not spend a Jev call on an obviously subjectless tail such as the
+    # observed "are driving on the street". Semantic ambiguity still goes to
+    # Jev; this catches only fragments beginning with an auxiliary.
+    candidates=[c for c in candidates if not re.match(r"^(?:am|are|is|was|were|be|been|being|has|have|had|do|does|did|can|could|may|might|must|shall|should|will|would)\b",c,re.I)]
     candidates=[re.sub(r"^(?:i am|i'm) sure,?\s+","",c,flags=re.I) for c in candidates]
     antecedent=None
     if candidates:

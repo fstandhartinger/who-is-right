@@ -8,8 +8,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from google import genai
-from google.genai import types
+from websockets.asyncio.client import connect
 
 MODEL = "gemini-2.5-flash-native-audio-latest"
 SESSION_SECONDS = int(os.getenv("SESSION_SECONDS", "180"))
@@ -97,12 +96,10 @@ async def jev_decision(claim, context):
     truth_prob=probability if str(label).lower()=="true" else 1-probability
     return {"claim":claim,"truthProbability":round(truth_prob,2),"confidence":round(abs(truth_prob-.5)*2,2),"provider":r.headers.get("x-jev-provider","Jev gateway")}
 
-TOOLS=[
- types.Tool(function_declarations=[
-  types.FunctionDeclaration(name="check_claim",description="Check one objective factual claim.",parameters=types.Schema(type="OBJECT",properties={"claim":types.Schema(type="STRING"),"context":types.Schema(type="STRING")},required=["claim","context"])),
-  types.FunctionDeclaration(name="feeling_not_fact",description="Mark a subjective feeling, taste, or relationship grievance without judging it.",parameters=types.Schema(type="OBJECT",properties={"claim":types.Schema(type="STRING"),"reason":types.Schema(type="STRING")},required=["claim","reason"]))
- ])
-]
+TOOLS=[{"functionDeclarations":[
+ {"name":"check_claim","description":"Check one objective factual claim.","parameters":{"type":"OBJECT","properties":{"claim":{"type":"STRING"},"context":{"type":"STRING"}},"required":["claim","context"]}},
+ {"name":"feeling_not_fact","description":"Mark a subjective feeling, taste, or relationship grievance without judging it.","parameters":{"type":"OBJECT","properties":{"claim":{"type":"STRING"},"reason":{"type":"STRING"}},"required":["claim","reason"]}}
+]}]
 
 @app.websocket("/ws")
 async def live(ws:WebSocket):
@@ -110,12 +107,12 @@ async def live(ws:WebSocket):
     if refusal:
         await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
     started=time.monotonic()
-    client=genai.Client(api_key=os.environ["GOOGLE_API_KEY"],http_options={"api_version":"v1alpha"})
-    # This Live model requires AUDIO response modality even though the demo only
-    # consumes its input transcription and tool calls (never generated speech).
-    cfg=types.LiveConnectConfig(response_modalities=["AUDIO"],system_instruction=SYSTEM,tools=TOOLS,input_audio_transcription=types.AudioTranscriptionConfig())
     try:
-      async with client.aio.live.connect(model=MODEL,config=cfg) as session:
+      url="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key="+os.environ["GOOGLE_API_KEY"]
+      async with connect(url,max_size=8_000_000) as session:
+        await session.send(json.dumps({"setup":{"model":"models/"+MODEL,"generationConfig":{"responseModalities":["AUDIO"]},"systemInstruction":{"parts":[{"text":SYSTEM}]},"tools":TOOLS,"inputAudioTranscription":{}}}))
+        setup=json.loads(await session.recv())
+        if "setupComplete" not in setup: raise RuntimeError("Gemini setup failed")
         await ws.send_json({"type":"ready","seconds":SESSION_SECONDS,"model":MODEL})
         async def upstream():
           while True:
@@ -123,19 +120,21 @@ async def live(ws:WebSocket):
             raw=await asyncio.wait_for(ws.receive_text(),timeout=SESSION_SECONDS)
             msg=json.loads(raw)
             if msg.get("type")=="audio":
-              await session.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]),mime_type="audio/pcm;rate=16000"))
+              await session.send(json.dumps({"realtimeInput":{"audio":{"data":msg["data"],"mimeType":"audio/pcm;rate=16000"}}}))
             elif msg.get("type")=="end":
-              await session.send_realtime_input(audio_stream_end=True); return
+              await session.send(json.dumps({"realtimeInput":{"audioStreamEnd":True}})); return
         async def downstream():
-          async for response in session.receive():
-            transcription=getattr(getattr(response,"server_content",None),"input_transcription",None)
-            if transcription and transcription.text: await ws.send_json({"type":"transcript","text":transcription.text})
-            tc=getattr(response,"tool_call",None)
+          async for raw in session:
+            response=json.loads(raw)
+            content=response.get("serverContent") or {}
+            transcription=content.get("inputTranscription") or {}
+            if transcription.get("text"): await ws.send_json({"type":"transcript","text":transcription["text"]})
+            tc=response.get("toolCall")
             if tc:
               replies=[]
-              for call in tc.function_calls:
-                args=call.args or {}
-                if call.name=="feeling_not_fact":
+              for call in tc.get("functionCalls",[]):
+                args=call.get("args") or {}; name=call.get("name")
+                if name=="feeling_not_fact":
                   result={"kind":"feeling","claim":args.get("claim","That"),"reason":args.get("reason","That’s a feeling, not a lab result.")}
                   await ws.send_json({"type":"feeling",**result})
                 else:
@@ -144,8 +143,8 @@ async def live(ws:WebSocket):
                   if result.get("limited"): await ws.send_json({"type":"limited","message":"The truth budget is tucked in for the night. Come back tomorrow."})
                   elif result.get("error"): await ws.send_json({"type":"error","message":result["error"]})
                   else: await ws.send_json({"type":"verdict",**result})
-                replies.append(types.FunctionResponse(id=call.id,name=call.name,response=result))
-              await session.send_tool_response(function_responses=replies)
+                replies.append({"id":call.get("id"),"name":name,"response":result})
+              await session.send(json.dumps({"toolResponse":{"functionResponses":replies}}))
         tasks=[asyncio.create_task(upstream()),asyncio.create_task(downstream())]
         done,pending=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
         for t in pending: t.cancel()

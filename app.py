@@ -9,17 +9,17 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from websockets.asyncio.client import connect
 
-TRANSCRIBE_MODEL = "gemini-2.5-flash-native-audio-latest"
+LIVE_MODEL = "gemini-3.8-live"
 JEV_MODEL = "jev-latest"
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 SERPER_URL = "https://google.serper.dev/search"
 SESSION_SECONDS = int(os.getenv("SESSION_SECONDS", "180"))
 SESSIONS_PER_IP_DAY = int(os.getenv("SESSIONS_PER_IP_DAY", "3"))
-GLOBAL_SESSIONS_DAY = int(os.getenv("GLOBAL_SESSIONS_DAY", "100"))
-GLOBAL_JEV_CALLS_DAY = int(os.getenv("GLOBAL_JEV_CALLS_DAY", "300"))
+GLOBAL_SESSIONS_DAY = int(os.getenv("GLOBAL_SESSIONS_DAY", "80"))
+GLOBAL_JEV_CALLS_DAY = int(os.getenv("GLOBAL_JEV_CALLS_DAY", "240"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "5"))
 SEARCHES_PER_SESSION = int(os.getenv("SEARCHES_PER_SESSION", "8"))
-SEARCHES_PER_DAY = int(os.getenv("SEARCHES_PER_DAY", "200"))
+SEARCHES_PER_DAY = int(os.getenv("SEARCHES_PER_DAY", "160"))
 UTTERANCE_PAUSE_SECONDS = float(os.getenv("UTTERANCE_PAUSE_SECONDS", "2.40"))
 PUNCTUATION_SETTLE_SECONDS = float(os.getenv("PUNCTUATION_SETTLE_SECONDS", "0.55"))
 ROLLING_SECONDS = 30
@@ -29,7 +29,22 @@ TYPESAFE_API_KEY = os.getenv("TYPESAFE_API_KEY", "")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "") or os.getenv("SERPER_DEV_API_KEY", "")
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
 
-TRANSCRIBE_SYSTEM = "Transcribe the speakers faithfully. Return input transcription only. Do not answer or judge them."
+LIVE_SYSTEM = """You are the referee in a playful live argument fact-check demo.
+Listen continuously and transcribe faithfully. Wait for a complete statement across audio chunks.
+When you hear one complete, objective, externally checkable factual claim, call check_claim
+exactly once with the full self-contained claim and your best guess whether a web check is
+needed. Ignore opinions, feelings, preferences, predictions, sarcasm, rhetorical remarks,
+relationship grievances, and incomplete fragments. Do not fact-check the claim yourself.
+Wait for the tool response, then say only its short comic_line. Continue listening afterward.
+Keep it kind: no winner, no shaming, and no medical, legal, or financial authority."""
+
+CHECK_CLAIM_TOOL={"functionDeclarations":[{
+    "name":"check_claim","description":"Check one complete objective factual claim.","behavior":"BLOCKING",
+    "parameters":{"type":"OBJECT","properties":{
+        "claim":{"type":"STRING","description":"The complete self-contained factual claim."},
+        "needs_web_check":{"type":"BOOLEAN","description":"Whether external web evidence is probably required."}
+    },"required":["claim","needs_web_check"]}
+}]}
 
 def today(): return date.today().isoformat()
 def now_ms(): return int(time.time() * 1000)
@@ -148,7 +163,7 @@ async def search_web(query, log):
     elapsed=round((time.monotonic()-started)*1000); log.write("web_search_response",query=query,results=results,timingMs=elapsed)
     return results,elapsed
 
-async def evaluate_candidate(candidate, utterance, rolling_context, log, session_searches):
+async def evaluate_candidate(candidate, utterance, rolling_context, log, session_searches, gemini_web_hint=None):
     state={"candidate":candidate,"assembled_utterance":utterance,"recent_transcript_context":rolling_context}
     triage_body={"model":JEV_MODEL,"state":state,"questions":{
         "is_checkable":{"type":"noul","instructions":"Is `candidate` a complete, objective, externally verifiable factual claim? Reject fragments, opinions, feelings, predictions, rhetorical remarks, and mere confidence phrases.","criteria":{"true":"A complete factual proposition with enough meaning to check.","false":"Not a factual claim or too fragmentary to check."}},
@@ -158,7 +173,7 @@ async def evaluate_candidate(candidate, utterance, rolling_context, log, session
     if not triage: return {"limited":True}
     answers=triage.get("answers") or {}; check_p=float((answers.get("is_checkable") or {}).get("noul",0)); web_p=float((answers.get("needs_web") or {}).get("noul",0))
     debug={"assembledUtterance":utterance,"claim":candidate,"checkableProbability":check_p,"webCheckProbability":web_p,"webCheckNeeded":False,"query":None,"results":[],"jevQuestions":triage_body["questions"],"jevOutput":answers,"timings":{"triageMs":tm["timingMs"]},"costUsd":tm["costUsd"],"model":tm["model"]}
-    log.write("claim_candidate",candidate=candidate,utterance=utterance,checkableProbability=check_p,webCheckProbability=web_p)
+    log.write("claim_candidate",candidate=candidate,utterance=utterance,checkableProbability=check_p,webCheckProbability=web_p,geminiWebHint=gemini_web_hint)
     if check_p < .50: return {"ignored":True,"debug":debug}
     results=[]; query=None
     if web_p >= .55 and session_searches[0] < SEARCHES_PER_SESSION and SERPER_API_KEY and await limits.take_search():
@@ -191,6 +206,47 @@ async def process_utterance(utterance, context, ws, log, session_searches):
             await ws.send_json({"type":"verdict",**{k:v for k,v in result.items() if k!="debug"}}); emitted=True
     if not emitted: await ws.send_json({"type":"no_claim","text":utterance})
 
+def comic_line(result):
+    if result.get("label")=="true": return "Ding ding — that claim survives the truth ray!"
+    if result.get("label")=="false": return "Plot twist: the facts just pulled the emergency brake!"
+    return "The evidence fog is too thick — no victory lap yet!"
+
+async def execute_check_claim(args, utterance, context, ws, log, session_searches, claim_cache):
+    claim=re.sub(r"\s+"," ",str(args.get("claim") or "")).strip()[:500]
+    hint=args.get("needs_web_check")
+    log.write("gemini_tool_call",tool="check_claim",arguments={"claim":claim,"needs_web_check":hint})
+    await ws.send_json({"type":"debug_trace","stage":"Gemini called check_claim","arguments":{"claim":claim,"needs_web_check":hint}})
+    cache_key=re.sub(r"[^\w]+"," ",claim.lower()).strip()
+    if cache_key in claim_cache:
+        response=claim_cache[cache_key]
+        log.write("gemini_tool_response",tool="check_claim",response=response,deduplicated=True)
+        await ws.send_json({"type":"debug_trace","stage":"Duplicate tool call reused","response":response})
+        return response
+    if len(claim.split()) < 3:
+        result={"ignored":True,"reason":"Incomplete claim","comic_line":"That sentence needs its other half before the truth ray fires!"}
+    else:
+        try: result=await evaluate_candidate(claim,utterance or claim,context or utterance or claim,log,session_searches,hint)
+        except Exception as exc:
+            log.write("pipeline_error",stage="check_claim",error=type(exc).__name__)
+            result={"error":"The tiny truth machine shrugged. Try the next claim.","comic_line":"The truth machine dropped its monocle — try the next claim!"}
+    if result.get("limited"):
+        await ws.send_json({"type":"limited","message":"The truth budget is tucked in for the night. Come back tomorrow."})
+        response={"status":"limited","comic_line":"The truth budget is tucked in for the night!"}
+    elif result.get("ignored"):
+        if result.get("debug"): await ws.send_json({"type":"debug_claim",**result["debug"]})
+        await ws.send_json({"type":"no_claim","text":claim})
+        response={"status":"ignored","reason":result.get("reason","Jev did not find a complete checkable claim."),"comic_line":result.get("comic_line","That one's a thought, not a testable fact!")}
+    elif result.get("error"):
+        await ws.send_json({"type":"error","message":result["error"]}); response=result
+    else:
+        await ws.send_json({"type":"debug_claim",**result["debug"]})
+        await ws.send_json({"type":"verdict",**{k:v for k,v in result.items() if k!="debug"}})
+        response={k:v for k,v in result.items() if k!="debug"}; response["comic_line"]=comic_line(result)
+    log.write("gemini_tool_response",tool="check_claim",response=response)
+    await ws.send_json({"type":"debug_trace","stage":"Backend returned tool response","response":response})
+    if cache_key: claim_cache[cache_key]=response
+    return response
+
 @asynccontextmanager
 async def lifespan(app):
     clean_old_logs(); yield
@@ -198,13 +254,13 @@ async def lifespan(app):
 app=FastAPI(lifespan=lifespan); PUBLIC=Path(__file__).parent/"public"
 
 @app.get("/health")
-async def health(): return {"ok":True,"transcriptionModel":TRANSCRIBE_MODEL,"jevModel":JEV_MODEL}
+async def health(): return {"ok":True,"liveModel":LIVE_MODEL,"jevModel":JEV_MODEL}
 
 @app.get("/api/config")
 async def config(request:Request,response:Response):
     token=request.headers.get("x-debug-token",""); debug=debug_authorized(token)
     if debug: response.set_cookie("wir_debug",token,max_age=10800,secure=request.url.scheme=="https",httponly=True,samesite="strict")
-    return {"model":TRANSCRIBE_MODEL,"jevModel":"jev-1.13.0","sessionSeconds":SESSION_SECONDS,"sessionsPerIpDay":SESSIONS_PER_IP_DAY,"debug":debug,"privacy":"Audio is processed live and is not recorded or stored. Debug sessions retain diagnostic transcripts for up to 48 hours."}
+    return {"model":LIVE_MODEL,"jevModel":"jev-1.13.0","sessionSeconds":SESSION_SECONDS,"sessionsPerIpDay":SESSIONS_PER_IP_DAY,"debug":debug,"privacy":"Audio is processed live and is not recorded or stored. Debug sessions retain diagnostic transcripts for up to 48 hours."}
 
 @app.get("/")
 async def index(): return FileResponse(PUBLIC/"index.html")
@@ -226,16 +282,17 @@ async def live(ws:WebSocket):
     await ws.accept(); log=DebugLog(debug_authorized(ws.cookies.get("wir_debug",""))); ip=client_ip(ws.scope); refusal=await limits.enter(ip)
     if refusal: await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
     started=time.monotonic(); assembler=UtteranceAssembler(); session_searches=[0]; queue=asyncio.Queue()
+    latest_utterance=[""]; tool_calls=[0]; fallback_tasks=[]; claim_cache={}
     log.write("session_started",debug=True)
     if not os.getenv("GOOGLE_API_KEY") or not TYPESAFE_API_KEY:
         await ws.send_json({"type":"error","message":"The referee is off duty. Please try later."}); await limits.leave(); await ws.close(code=1011); return
     try:
       url="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key="+os.environ["GOOGLE_API_KEY"]
       async with connect(url,max_size=8_000_000) as session:
-        setup_body={"setup":{"model":"models/"+TRANSCRIBE_MODEL,"generationConfig":{"responseModalities":["AUDIO"]},"systemInstruction":{"parts":[{"text":TRANSCRIBE_SYSTEM}]},"inputAudioTranscription":{}}}
-        log.write("tool_call",tool="gemini_live_setup",arguments={"model":TRANSCRIBE_MODEL}); await session.send(json.dumps(setup_body)); setup=json.loads(await session.recv())
+        setup_body={"setup":{"model":"models/"+LIVE_MODEL,"generationConfig":{"responseModalities":["AUDIO"]},"systemInstruction":{"parts":[{"text":LIVE_SYSTEM}]},"tools":[CHECK_CLAIM_TOOL],"inputAudioTranscription":{},"outputAudioTranscription":{}}}
+        log.write("tool_call",tool="gemini_live_setup",arguments={"model":LIVE_MODEL}); await session.send(json.dumps(setup_body)); setup=json.loads(await session.recv())
         if "setupComplete" not in setup: raise RuntimeError("Gemini setup failed")
-        await ws.send_json({"type":"ready","seconds":SESSION_SECONDS,"model":TRANSCRIBE_MODEL,"debug":log.enabled,"sessionId":log.session_id})
+        await ws.send_json({"type":"ready","seconds":SESSION_SECONDS,"model":LIVE_MODEL,"debug":log.enabled,"sessionId":log.session_id})
         async def upstream():
           while True:
             if time.monotonic()-started>SESSION_SECONDS: await ws.send_json({"type":"ended","message":"Three minutes! The gavel needs a tiny nap."}); return
@@ -245,17 +302,38 @@ async def live(ws:WebSocket):
             elif msg.get("type")=="end": await session.send(json.dumps({"realtimeInput":{"audioStreamEnd":True}})); return
         async def downstream():
           async for raw in session:
-            response=json.loads(raw); transcription=(response.get("serverContent") or {}).get("inputTranscription") or {}
+            response=json.loads(raw); server=response.get("serverContent") or {}; transcription=server.get("inputTranscription") or {}
             if transcription.get("text"): await queue.put(transcription["text"])
+            for part in (server.get("modelTurn") or {}).get("parts") or []:
+                inline=part.get("inlineData") or {}
+                if inline.get("data") and str(inline.get("mimeType","")).startswith("audio/pcm"):
+                    await ws.send_json({"type":"audio","data":inline["data"],"mimeType":inline.get("mimeType","audio/pcm;rate=24000")})
+            output=(server.get("outputTranscription") or {}).get("text")
+            if output: log.write("gemini_comic_line",text=output); await ws.send_json({"type":"comic_line","text":output})
+            for call in (response.get("toolCall") or {}).get("functionCalls") or []:
+                if call.get("name")!="check_claim": continue
+                tool_calls[0]+=1; args=call.get("args") or {}
+                result=await execute_check_claim(args,latest_utterance[0],assembler.context(),ws,log,session_searches,claim_cache)
+                await session.send(json.dumps({"toolResponse":{"functionResponses":[{"id":call.get("id"),"name":"check_claim","response":{"result":result}}]}}))
+        async def fallback(utterance,context,call_count):
+          await asyncio.sleep(1.6)
+          if tool_calls[0]==call_count==0:
+            log.write("assembly_backstop",utterance=utterance)
+            await process_utterance(utterance,context,ws,log,session_searches)
         async def assemble():
           while True:
             try: text=await asyncio.wait_for(queue.get(),timeout=.2); assembler.add(text); log.write("raw_transcript_chunk",text=text); await ws.send_json({"type":"transcript","text":text})
             except asyncio.TimeoutError: pass
-            if assembler.ready(): await process_utterance(assembler.flush(),assembler.context(),ws,log,session_searches)
+            if assembler.ready():
+                utterance=assembler.flush(); context=assembler.context(); latest_utterance[0]=utterance
+                log.write("utterance_assembled",utterance=utterance,rollingContext=context); await ws.send_json({"type":"utterance","text":utterance})
+                fallback_tasks.append(asyncio.create_task(fallback(utterance,context,tool_calls[0])))
         tasks=[asyncio.create_task(upstream()),asyncio.create_task(downstream()),asyncio.create_task(assemble())]
         done,pending=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
-        if assembler.pending: await process_utterance(assembler.flush(),assembler.context(),ws,log,session_searches)
+        if assembler.pending:
+            latest_utterance[0]=assembler.flush(); log.write("utterance_assembled",utterance=latest_utterance[0],rollingContext=assembler.context())
         for t in pending: t.cancel()
+        for t in fallback_tasks: t.cancel()
         for t in tasks:
           with suppress(asyncio.CancelledError,WebSocketDisconnect): await t
     except (WebSocketDisconnect,asyncio.TimeoutError): pass

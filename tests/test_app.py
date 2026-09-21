@@ -63,3 +63,15 @@ def test_debug_requires_exact_nonempty_token(monkeypatch):
     assert app.debug_authorized("secret-token")
     assert not app.debug_authorized("")
     assert not app.debug_authorized("secret")
+
+def test_live_model_and_blocking_check_claim_tool_are_truthful():
+    assert app.LIVE_MODEL == "gemini-3.8-live"
+    declaration=app.CHECK_CLAIM_TOOL["functionDeclarations"][0]
+    assert declaration["name"] == "check_claim"
+    assert declaration["behavior"] == "BLOCKING"
+    assert declaration["parameters"]["required"] == ["claim","needs_web_check"]
+
+def test_system_waits_for_complete_claims_and_ignores_opinions():
+    instruction=app.LIVE_SYSTEM.lower()
+    assert "complete statement across audio chunks" in instruction
+    assert "opinions" in instruction and "feelings" in instruction

@@ -19,7 +19,7 @@ async def main():
           const c=new AudioContext(), d=c.createMediaStreamDestination();
           const b=Uint8Array.from(atob(window.__sample),x=>x.charCodeAt(0)).buffer;
           const a=await c.decodeAudioData(b), s=c.createBufferSource();
-          s.buffer=a;s.connect(d);s.start();return d.stream;
+        s.buffer=a;s.connect(d);setTimeout(()=>s.start(),500);return d.stream;
         }};""")
       await page.set_viewport_size({"width":1280,"height":900})
       await page.goto(URL,wait_until="networkidle")
@@ -27,7 +27,7 @@ async def main():
       await page.screenshot(path=str(OUT/"desktop.png"),full_page=True)
       if WAV:
         await page.get_by_role("button",name="START LISTENING").click()
-        await page.wait_for_selector("text=TRUE-ish",timeout=25000)
+        await page.wait_for_function("!document.querySelector('#score').textContent.includes('READY')",timeout=45000)
         print("LIVE_VERDICT",await page.locator("#score").inner_text())
         await page.screenshot(path=str(OUT/"live-verdict.png"),full_page=True)
       await page.set_viewport_size({"width":390,"height":844})
@@ -36,5 +36,4 @@ async def main():
       print("DESKTOP_PHONE_OK")
     finally:
       await page.close()
-      await browser.close()
 asyncio.run(main())

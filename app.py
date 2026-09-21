@@ -1,42 +1,45 @@
-import asyncio, base64, json, os, time
-from contextlib import suppress
-from collections import defaultdict
-from contextlib import asynccontextmanager
+import asyncio, base64, hashlib, hmac, json, os, re, time, uuid
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager, suppress
 from datetime import date
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from websockets.asyncio.client import connect
 
-MODEL = "gemini-2.5-flash-native-audio-latest"
+TRANSCRIBE_MODEL = "gemini-2.5-flash-native-audio-latest"
+JEV_MODEL = "jev-latest"
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+SERPER_URL = "https://google.serper.dev/search"
 SESSION_SECONDS = int(os.getenv("SESSION_SECONDS", "180"))
 SESSIONS_PER_IP_DAY = int(os.getenv("SESSIONS_PER_IP_DAY", "3"))
 GLOBAL_SESSIONS_DAY = int(os.getenv("GLOBAL_SESSIONS_DAY", "100"))
 GLOBAL_JEV_CALLS_DAY = int(os.getenv("GLOBAL_JEV_CALLS_DAY", "300"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "5"))
-JEV_URL = "https://jev-router.app.mintapis.com/v1/systemone"
-JEV_API_KEY = os.getenv("JEV_API_KEY", "")
+SEARCHES_PER_SESSION = int(os.getenv("SEARCHES_PER_SESSION", "8"))
+SEARCHES_PER_DAY = int(os.getenv("SEARCHES_PER_DAY", "200"))
+UTTERANCE_PAUSE_SECONDS = float(os.getenv("UTTERANCE_PAUSE_SECONDS", "1.35"))
+ROLLING_SECONDS = 30
+DEBUG_RETENTION_SECONDS = 48 * 3600
+DEBUG_DIR = Path(os.getenv("DEBUG_LOG_DIR", "/tmp/who-is-right-debug"))
+TYPESAFE_API_KEY = os.getenv("TYPESAFE_API_KEY", "")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "") or os.getenv("SERPER_DEV_API_KEY", "")
+DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
 
-SYSTEM = """You are the referee in a playful live argument fact-check party demo.
-Listen to the speakers. Emit input transcription continuously. When you hear ONE complete,
-checkable factual claim, call check_claim exactly once with the claim and at most two short
-sentences of relevant context. Never call it for preferences, predictions, sarcasm, feelings,
-relationship grievances, or subjective/general claims (for example 'you always leave dishes').
-For those, call feeling_not_fact with a short quote and playful, kind explanation. Do not answer
-claims yourself. Wait for the tool result, then continue listening. Keep the tone kind: no winner,
-no shaming, no medical/legal/financial authority."""
+TRANSCRIBE_SYSTEM = "Transcribe the speakers faithfully. Return input transcription only. Do not answer or judge them."
 
 def today(): return date.today().isoformat()
+def now_ms(): return int(time.time() * 1000)
 
 class Limits:
     def __init__(self):
         self.day = today(); self.by_ip = defaultdict(int); self.sessions = 0
-        self.jev = 0; self.active = 0; self.lock = asyncio.Lock()
+        self.jev = self.searches = self.active = 0; self.lock = asyncio.Lock()
     def reset(self):
         if self.day != today():
-            self.day=today(); self.by_ip.clear(); self.sessions=self.jev=0
+            self.day=today(); self.by_ip.clear(); self.sessions=self.jev=self.searches=0
     async def enter(self, ip):
         async with self.lock:
             self.reset()
@@ -51,6 +54,11 @@ class Limits:
             self.reset()
             if self.jev >= GLOBAL_JEV_CALLS_DAY: return False
             self.jev += 1; return True
+    async def take_search(self):
+        async with self.lock:
+            self.reset()
+            if self.searches >= SEARCHES_PER_DAY: return False
+            self.searches += 1; return True
 
 limits=Limits()
 
@@ -58,106 +66,191 @@ def client_ip(scope):
     headers={k.decode():v.decode() for k,v in scope.get("headers",[])}
     return headers.get("cf-connecting-ip") or headers.get("x-forwarded-for","").split(",")[0].strip() or scope.get("client",("unknown",))[0]
 
+def debug_authorized(token):
+    return bool(DEBUG_TOKEN and token and hmac.compare_digest(token, DEBUG_TOKEN))
+
+def clean_old_logs():
+    if not DEBUG_DIR.exists(): return
+    cutoff=time.time()-DEBUG_RETENTION_SECONDS
+    for p in DEBUG_DIR.glob("*.jsonl"):
+        with suppress(OSError):
+            if p.stat().st_mtime < cutoff: p.unlink()
+
+class DebugLog:
+    def __init__(self, enabled):
+        self.enabled=enabled; self.session_id=uuid.uuid4().hex[:12]; self.started=now_ms()
+        self.path=DEBUG_DIR/f"{self.started}-{self.session_id}.jsonl"
+        if enabled: DEBUG_DIR.mkdir(parents=True,exist_ok=True); clean_old_logs()
+    def write(self,event,**data):
+        record={"timestamp":now_ms(),"sessionId":self.session_id,"event":event,**data}
+        if self.enabled:
+            with self.path.open("a",encoding="utf-8") as f: f.write(json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n")
+        return record
+
+class UtteranceAssembler:
+    def __init__(self, rolling_seconds=ROLLING_SECONDS):
+        self.pending=[]; self.history=deque(); self.last_chunk_at=0.; self.rolling_seconds=rolling_seconds
+    def add(self,text,at=None):
+        text=re.sub(r"[\r\n\t]+"," ",text or "")
+        if not text.strip(): return
+        at=at or time.monotonic(); self.pending.append(text); self.last_chunk_at=at
+        self.history.append((at,text))
+        while self.history and at-self.history[0][0] > self.rolling_seconds: self.history.popleft()
+    def ready(self,at=None):
+        return bool(self.pending and (at or time.monotonic())-self.last_chunk_at >= UTTERANCE_PAUSE_SECONDS)
+    def flush(self):
+        text="".join(self.pending); self.pending=[]
+        text=re.sub(r"\s+([,.;!?])",r"\1",text); text=re.sub(r"([,.;!?])(\w)",r"\1 \2",text)
+        return re.sub(r"\s+"," ",text).strip()
+    def context(self): return re.sub(r"\s+"," ","".join(x[1] for x in self.history)).strip()
+
+def claim_candidates(utterance):
+    # Preserve whole clauses; Jev rejects hedges/opinions. Pronouns are resolved by
+    # supplying the complete utterance and rolling context to every judgment.
+    pieces=re.split(r"(?<=[.!?])\s+|\s*(?:;|\b(?:but|and)\b)\s*|,\s*(?=(?:I|you|he|she|it|we|they|there)\b)",utterance,flags=re.I)
+    candidates=[p.strip(" ,.;\"'“”") for p in pieces if len(p.strip(" ,.;\"'“”").split()) >= 3]
+    candidates=[re.sub(r"^(?:i am|i'm) sure,?\s+","",c,flags=re.I) for c in candidates]
+    antecedent=None
+    if candidates:
+        match=re.match(r"^(.+?)\s+(?:is|was|has|had|does|did|can|will)\b",candidates[0],re.I)
+        if match and 1 <= len(match.group(1).split()) <= 8: antecedent=match.group(1)
+    if antecedent: candidates=[re.sub(r"^it\b",antecedent,c,flags=re.I) for c in candidates]
+    return candidates
+
+async def jev(body, log, purpose):
+    if not await limits.take_jev(): return None, {"limited":True}
+    started=time.monotonic(); log.write("jev_request",purpose=purpose,request=body)
+    async with httpx.AsyncClient(timeout=12) as client:
+        r=await client.post(JEV_URL,json=body,headers={"Authorization":f"Bearer {TYPESAFE_API_KEY}"}); r.raise_for_status(); data=r.json()
+    elapsed=round((time.monotonic()-started)*1000)
+    usage=data.get("usage") or {}; cost=round(float(usage.get("input_tokens",0))*.042/1_000_000,8)
+    log.write("jev_response",purpose=purpose,response=data,timingMs=elapsed,costUsd=cost)
+    return data,{"timingMs":elapsed,"costUsd":cost,"model":data.get("model",JEV_MODEL),"usage":usage}
+
+async def search_web(query, log):
+    started=time.monotonic(); log.write("web_search_request",query=query)
+    async with httpx.AsyncClient(timeout=10) as client:
+        r=await client.post(SERPER_URL,json={"q":query,"num":5},headers={"X-API-KEY":SERPER_API_KEY,"Content-Type":"application/json"}); r.raise_for_status(); data=r.json()
+    results=[{"title":x.get("title","")[:180],"snippet":x.get("snippet","")[:500],"source":x.get("link","")[:400]} for x in (data.get("organic") or [])[:5]]
+    elapsed=round((time.monotonic()-started)*1000); log.write("web_search_response",query=query,results=results,timingMs=elapsed)
+    return results,elapsed
+
+async def evaluate_candidate(candidate, utterance, rolling_context, log, session_searches):
+    state={"candidate":candidate,"assembled_utterance":utterance,"recent_transcript_context":rolling_context}
+    triage_body={"model":JEV_MODEL,"state":state,"questions":{
+        "is_checkable":{"type":"noul","instructions":"Is `candidate` a complete, objective, externally verifiable factual claim? Reject fragments, opinions, feelings, predictions, rhetorical remarks, and mere confidence phrases.","criteria":{"true":"A complete factual proposition with enough meaning to check.","false":"Not a factual claim or too fragmentary to check."}},
+        "needs_web":{"type":"noul","instructions":"If `candidate` is a checkable factual claim, does verifying its truth require current or external web evidence rather than only interpreting the wording?","criteria":{"true":"External evidence or current facts are needed.","false":"No web lookup is appropriate, or the candidate is not checkable."}}
+    }}
+    triage,tm=await jev(triage_body,log,"claim_triage")
+    if not triage: return {"limited":True}
+    answers=triage.get("answers") or {}; check_p=float((answers.get("is_checkable") or {}).get("noul",0)); web_p=float((answers.get("needs_web") or {}).get("noul",0))
+    debug={"assembledUtterance":utterance,"claim":candidate,"checkableProbability":check_p,"webCheckProbability":web_p,"webCheckNeeded":False,"query":None,"results":[],"jevQuestions":triage_body["questions"],"jevOutput":answers,"timings":{"triageMs":tm["timingMs"]},"costUsd":tm["costUsd"],"model":tm["model"]}
+    log.write("claim_candidate",candidate=candidate,utterance=utterance,checkableProbability=check_p,webCheckProbability=web_p)
+    if check_p < .50: return {"ignored":True,"debug":debug}
+    results=[]; query=None
+    if web_p >= .55 and session_searches[0] < SEARCHES_PER_SESSION and SERPER_API_KEY and await limits.take_search():
+        query=re.sub(r"[^\w\s'\-]"," ",candidate); query=re.sub(r"\s+"," ",query).strip()[:160]
+        log.write("tool_call",tool="serper_search",arguments={"query":query}); results,search_ms=await search_web(query,log); session_searches[0]+=1
+        debug.update(webCheckNeeded=True,query=query,results=results); debug["timings"]["searchMs"]=search_ms
+    evidence_section=f"Web search results for query: {query}\n"+"\n".join(f"- {x['title']} — {x['snippet']} ({x['source']})" for x in results) if results else "Web search: not requested by the verification triage."
+    verdict_state={**state,"web_evidence":evidence_section}
+    question={"type":"choice","instructions":"Given `candidate`, its full utterance/context, and the clearly labelled web evidence when present, is the factual claim true, false, or not verifiable from the available evidence? Do not treat the speaker's confidence as evidence.","criteria":{"true":"Evidence supports the claim.","false":"Evidence contradicts the claim.","uncertain":"Evidence is insufficient, mixed, or the claim remains ambiguous."}}
+    body={"model":JEV_MODEL,"state":verdict_state,"questions":{"verdict":question}}
+    verdict,vm=await jev(body,log,"fact_verdict"); answer=(verdict.get("answers") or {}).get("verdict") or {}
+    probs=answer.get("probabilities") or {}; label=answer.get("choice","uncertain"); truth_prob=float(probs.get("true",0)); confidence=float(answer.get("confidence",0))
+    debug["jevQuestions"]={"triage":triage_body["questions"],"verdict":question}; debug["jevOutput"]={"triage":answers,"verdict":answer}; debug["timings"]["verdictMs"]=vm["timingMs"]; debug["costUsd"]=round(debug["costUsd"]+vm["costUsd"],8); debug["model"]=vm["model"]
+    log.write("tool_call",tool="publish_verdict",arguments={"claim":candidate,"label":label})
+    return {"claim":candidate,"truthProbability":round(truth_prob,2),"confidence":round(confidence,2),"label":label,"provider":vm["model"],"debug":debug}
+
+async def process_utterance(utterance, context, ws, log, session_searches):
+    log.write("utterance_assembled",utterance=utterance,rollingContext=context)
+    await ws.send_json({"type":"utterance","text":utterance})
+    candidates=claim_candidates(utterance)
+    log.write("tool_call",tool="extract_claim_candidates",arguments={"utterance":utterance},result=candidates)
+    emitted=False
+    for candidate in candidates[:4]:
+        try: result=await evaluate_candidate(candidate,utterance,context,log,session_searches)
+        except Exception as exc:
+            log.write("pipeline_error",stage="evaluate_candidate",error=type(exc).__name__); continue
+        if result.get("limited"): await ws.send_json({"type":"limited","message":"The truth budget is tucked in for the night. Come back tomorrow."}); return
+        await ws.send_json({"type":"debug_claim",**result["debug"]})
+        if not result.get("ignored"):
+            await ws.send_json({"type":"verdict",**{k:v for k,v in result.items() if k!="debug"}}); emitted=True
+    if not emitted: await ws.send_json({"type":"no_claim","text":utterance})
+
 @asynccontextmanager
 async def lifespan(app):
-    yield
+    clean_old_logs(); yield
 
-app=FastAPI(lifespan=lifespan)
-PUBLIC=Path(__file__).parent/"public"
+app=FastAPI(lifespan=lifespan); PUBLIC=Path(__file__).parent/"public"
 
 @app.get("/health")
-async def health(): return {"ok":True,"model":MODEL}
+async def health(): return {"ok":True,"transcriptionModel":TRANSCRIBE_MODEL,"jevModel":JEV_MODEL}
 
 @app.get("/api/config")
-async def config():
-    return {"model":MODEL,"sessionSeconds":SESSION_SECONDS,"sessionsPerIpDay":SESSIONS_PER_IP_DAY,"privacy":"Audio is processed live and is not recorded or stored."}
+async def config(request:Request,response:Response):
+    token=request.headers.get("x-debug-token",""); debug=debug_authorized(token)
+    if debug: response.set_cookie("wir_debug",token,max_age=10800,secure=request.url.scheme=="https",httponly=True,samesite="strict")
+    return {"model":TRANSCRIBE_MODEL,"jevModel":"jev-1.13.0","sessionSeconds":SESSION_SECONDS,"sessionsPerIpDay":SESSIONS_PER_IP_DAY,"debug":debug,"privacy":"Audio is processed live and is not recorded or stored. Debug sessions retain diagnostic transcripts for up to 48 hours."}
 
 @app.get("/")
 async def index(): return FileResponse(PUBLIC/"index.html")
-
 @app.get("/app.js")
 async def js(): return FileResponse(PUBLIC/"app.js",media_type="text/javascript")
-
 @app.get("/style.css")
 async def css(): return FileResponse(PUBLIC/"style.css",media_type="text/css")
 
-async def jev_decision(claim, context):
-    if not await limits.take_jev(): return {"limited":True}
-    body={"model":"classifier-fast","state":f"Claim: {claim}\nContext: {context}\nJudge only factual truth. If context is insufficient, prefer uncertain.","questions":{"verdict":{"type":"choice","instructions":"Is the claim factually true?","criteria":{"true":"The factual claim is correct.","false":"The factual claim is incorrect."}}}}
-    async with httpx.AsyncClient(timeout=8) as client:
-        r=await client.post(JEV_URL,json=body,headers={"Authorization":f"Bearer {JEV_API_KEY}"}); r.raise_for_status(); data=r.json()
-    answer=(data.get("answers") or {}).get("verdict") or {}
-    if isinstance(answer,str):
-        label=answer; probability=.86
-    else:
-        label=answer.get("answer") or answer.get("choice") or answer.get("value") or "true"
-        probability=float(answer.get("probability") or answer.get("confidence") or .72)
-    probability=max(.5,min(.99,probability))
-    truth_prob=probability if str(label).lower()=="true" else 1-probability
-    return {"claim":claim,"truthProbability":round(truth_prob,2),"confidence":round(abs(truth_prob-.5)*2,2),"provider":r.headers.get("x-jev-provider","Jev gateway")}
-
-TOOLS=[{"functionDeclarations":[
- {"name":"check_claim","description":"Check one objective factual claim.","parameters":{"type":"OBJECT","properties":{"claim":{"type":"STRING"},"context":{"type":"STRING"}},"required":["claim","context"]}},
- {"name":"feeling_not_fact","description":"Mark a subjective feeling, taste, or relationship grievance without judging it.","parameters":{"type":"OBJECT","properties":{"claim":{"type":"STRING"},"reason":{"type":"STRING"}},"required":["claim","reason"]}}
-]}]
+@app.get("/api/debug/logs")
+async def debug_logs(request:Request):
+    if not debug_authorized(request.headers.get("x-debug-token","") or request.cookies.get("wir_debug","")): return JSONResponse({"detail":"not found"},404)
+    clean_old_logs(); rows=[]
+    for p in sorted(DEBUG_DIR.glob("*.jsonl"),reverse=True)[:20]:
+        with suppress(Exception): rows.append({"file":p.name,"events":[json.loads(x) for x in p.read_text().splitlines()]})
+    return {"retentionHours":48,"sessions":rows}
 
 @app.websocket("/ws")
 async def live(ws:WebSocket):
-    await ws.accept(); ip=client_ip(ws.scope); refusal=await limits.enter(ip)
-    if refusal:
-        await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
-    started=time.monotonic()
-    if not os.getenv("GOOGLE_API_KEY"):
+    await ws.accept(); log=DebugLog(debug_authorized(ws.cookies.get("wir_debug",""))); ip=client_ip(ws.scope); refusal=await limits.enter(ip)
+    if refusal: await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
+    started=time.monotonic(); assembler=UtteranceAssembler(); session_searches=[0]; queue=asyncio.Queue()
+    log.write("session_started",debug=True)
+    if not os.getenv("GOOGLE_API_KEY") or not TYPESAFE_API_KEY:
         await ws.send_json({"type":"error","message":"The referee is off duty. Please try later."}); await limits.leave(); await ws.close(code=1011); return
     try:
       url="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key="+os.environ["GOOGLE_API_KEY"]
       async with connect(url,max_size=8_000_000) as session:
-        await session.send(json.dumps({"setup":{"model":"models/"+MODEL,"generationConfig":{"responseModalities":["AUDIO"]},"systemInstruction":{"parts":[{"text":SYSTEM}]},"tools":TOOLS,"inputAudioTranscription":{}}}))
-        setup=json.loads(await session.recv())
+        setup_body={"setup":{"model":"models/"+TRANSCRIBE_MODEL,"generationConfig":{"responseModalities":["AUDIO"]},"systemInstruction":{"parts":[{"text":TRANSCRIBE_SYSTEM}]},"inputAudioTranscription":{}}}
+        log.write("tool_call",tool="gemini_live_setup",arguments={"model":TRANSCRIBE_MODEL}); await session.send(json.dumps(setup_body)); setup=json.loads(await session.recv())
         if "setupComplete" not in setup: raise RuntimeError("Gemini setup failed")
-        await ws.send_json({"type":"ready","seconds":SESSION_SECONDS,"model":MODEL})
+        await ws.send_json({"type":"ready","seconds":SESSION_SECONDS,"model":TRANSCRIBE_MODEL,"debug":log.enabled,"sessionId":log.session_id})
         async def upstream():
           while True:
             if time.monotonic()-started>SESSION_SECONDS: await ws.send_json({"type":"ended","message":"Three minutes! The gavel needs a tiny nap."}); return
-            raw=await asyncio.wait_for(ws.receive_text(),timeout=SESSION_SECONDS)
-            msg=json.loads(raw)
-            if msg.get("type")=="audio":
-              await session.send(json.dumps({"realtimeInput":{"audio":{"data":msg["data"],"mimeType":"audio/pcm;rate=16000"}}}))
-            elif msg.get("type")=="end":
-              await session.send(json.dumps({"realtimeInput":{"audioStreamEnd":True}})); return
+            raw=await asyncio.wait_for(ws.receive_text(),timeout=SESSION_SECONDS); msg=json.loads(raw)
+            if msg.get("type")=="audio": await session.send(json.dumps({"realtimeInput":{"audio":{"data":msg["data"],"mimeType":"audio/pcm;rate=16000"}}}))
+            elif msg.get("type")=="debug_transcript" and log.enabled: await queue.put(msg.get("text",""))
+            elif msg.get("type")=="end": await session.send(json.dumps({"realtimeInput":{"audioStreamEnd":True}})); return
         async def downstream():
           async for raw in session:
-            response=json.loads(raw)
-            content=response.get("serverContent") or {}
-            transcription=content.get("inputTranscription") or {}
-            if transcription.get("text"): await ws.send_json({"type":"transcript","text":transcription["text"]})
-            tc=response.get("toolCall")
-            if tc:
-              replies=[]
-              for call in tc.get("functionCalls",[]):
-                args=call.get("args") or {}; name=call.get("name")
-                if name=="feeling_not_fact":
-                  result={"kind":"feeling","claim":args.get("claim","That"),"reason":args.get("reason","That’s a feeling, not a lab result.")}
-                  await ws.send_json({"type":"feeling",**result})
-                else:
-                  try: result=await jev_decision(args.get("claim",""),args.get("context",""))
-                  except Exception: result={"error":"The tiny truth machine shrugged. Try the next claim."}
-                  if result.get("limited"): await ws.send_json({"type":"limited","message":"The truth budget is tucked in for the night. Come back tomorrow."})
-                  elif result.get("error"): await ws.send_json({"type":"error","message":result["error"]})
-                  else: await ws.send_json({"type":"verdict",**result})
-                replies.append({"id":call.get("id"),"name":name,"response":result})
-              await session.send(json.dumps({"toolResponse":{"functionResponses":replies}}))
-        tasks=[asyncio.create_task(upstream()),asyncio.create_task(downstream())]
+            response=json.loads(raw); transcription=(response.get("serverContent") or {}).get("inputTranscription") or {}
+            if transcription.get("text"): await queue.put(transcription["text"])
+        async def assemble():
+          while True:
+            try: text=await asyncio.wait_for(queue.get(),timeout=.2); assembler.add(text); log.write("raw_transcript_chunk",text=text); await ws.send_json({"type":"transcript","text":text})
+            except asyncio.TimeoutError: pass
+            if assembler.ready(): await process_utterance(assembler.flush(),assembler.context(),ws,log,session_searches)
+        tasks=[asyncio.create_task(upstream()),asyncio.create_task(downstream()),asyncio.create_task(assemble())]
         done,pending=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
+        if assembler.pending: await process_utterance(assembler.flush(),assembler.context(),ws,log,session_searches)
         for t in pending: t.cancel()
         for t in tasks:
-          with suppress(asyncio.CancelledError, WebSocketDisconnect): await t
+          with suppress(asyncio.CancelledError,WebSocketDisconnect): await t
     except (WebSocketDisconnect,asyncio.TimeoutError): pass
-    except Exception:
-      try: await ws.send_json({"type":"error","message":"The referee dropped the gavel. Please try again."})
-      except Exception: pass
+    except Exception as exc:
+      log.write("session_error",error=type(exc).__name__)
+      with suppress(Exception): await ws.send_json({"type":"error","message":"The referee dropped the gavel. Please try again."})
     finally:
-      await limits.leave()
+      log.write("session_ended",searches=session_searches[0]); await limits.leave()
 
 @app.get("/{path:path}")
 async def static(path:str):

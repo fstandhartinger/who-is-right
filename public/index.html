@@ -1,4 +1,5 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Who Is Right?!</title><link rel="stylesheet" href="/style.css"></head>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Who Is Right?!</title><link rel="stylesheet" href="/style.css">
+<style>.burst{z-index:3;width:148px;height:148px;padding:31px;font-size:23px;line-height:.92}.bubble{z-index:2}.debug-panel{margin:22px 0 8px;border:3px solid var(--ink);background:#fff;font-size:12px}.debug-panel summary{cursor:pointer;padding:10px;font-weight:900;background:#dff6ff}.debug-panel article{padding:10px;border-top:2px solid var(--ink)}.debug-panel dl{display:grid;grid-template-columns:105px 1fr;gap:5px;margin-bottom:0}.debug-panel dt{font-weight:900}.debug-panel dd{margin:0;overflow-wrap:anywhere}.debug-panel code{font-size:10px}.debug-panel a{color:#075b93}@media(max-width:560px){.burst{width:120px;height:120px;padding:27px;font-size:18px;line-height:.9}.bubble{padding-left:36px}.debug-panel dl{grid-template-columns:1fr}.debug-panel dt{margin-top:5px}}</style></head>
 <body><main>
   <header><div class="logo">WHO IS <span>RIGHT?!</span></div><div class="model" id="model">Checking referee…</div></header>
   <section class="hero">
@@ -15,6 +16,7 @@
     <div class="timer" id="timer">03:00 max • 3 sessions / IP / day</div>
     <div class="status" id="status">Microphone stays off until you tap.</div>
   </section>
-  <section class="tape"><b>PARTY DEMO, NOT A FACT AUTHORITY.</b> It can be confidently wrong. Opinions get no verdict. Nobody “wins.”</section>
-  <footer><span>🔒 Audio is processed live only — never recorded or stored.</span><span>Gemini listens → Jev checks one claim</span><a href="https://github.com/fstandhartinger/who-is-right" target="_blank">MIT source ↗</a></footer>
+  <section class="tape"><b>PARTY DEMO, NOT A FACT AUTHORITY</b></section>
+  <details class="debug-panel" id="debug-panel" hidden><summary>DEBUG DETAILS</summary><div id="debug-items"><p>Claims appear here with their utterance, search evidence, Jev probabilities, timing, and cost.</p></div></details>
+  <footer><span id="privacy">🔒 Audio is processed live only — never recorded or stored.</span><span>Gemini transcribes → Jev decides → Serper finds evidence when needed</span><a href="https://github.com/fstandhartinger/who-is-right" target="_blank">MIT source ↗</a></footer>
 </main><script src="/app.js"></script></body></html>

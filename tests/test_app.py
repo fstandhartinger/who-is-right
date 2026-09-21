@@ -75,3 +75,14 @@ def test_system_waits_for_complete_claims_and_ignores_opinions():
     instruction=app.LIVE_SYSTEM.lower()
     assert "complete statement across audio chunks" in instruction
     assert "opinions" in instruction and "feelings" in instruction
+
+def test_pending_utterance_is_available_before_flush():
+    assembler=app.UtteranceAssembler()
+    assembler.add("Der FC Bayern ",at=1)
+    assembler.add("hat heute gewonnen.",at=2)
+    assert assembler.current() == "Der FC Bayern hat heute gewonnen."
+
+def test_coin_flip_or_low_confidence_verdict_is_uncertain():
+    assert app.calibrated_label("true",.5,.25) == "uncertain"
+    assert app.calibrated_label("false",.2,.45) == "uncertain"
+    assert app.calibrated_label("true",.9,.85) == "true"

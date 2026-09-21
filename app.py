@@ -126,6 +126,7 @@ class UtteranceAssembler:
         text="".join(self.pending); self.pending=[]
         text=re.sub(r"\s+([,.;!?])",r"\1",text); text=re.sub(r"([,.;!?])(\w)",r"\1 \2",text)
         return re.sub(r"\s+"," ",text).strip()
+    def current(self): return re.sub(r"\s+"," ","".join(self.pending)).strip()
     def context(self): return re.sub(r"\s+"," ","".join(x[1] for x in self.history)).strip()
 
 def claim_candidates(utterance):
@@ -144,6 +145,9 @@ def claim_candidates(utterance):
         if match and 1 <= len(match.group(1).split()) <= 8: antecedent=match.group(1)
     if antecedent: candidates=[re.sub(r"^it\b",antecedent,c,flags=re.I) for c in candidates]
     return candidates
+
+def calibrated_label(label,truth_probability,confidence):
+    return "uncertain" if confidence < .5 or .4 <= truth_probability <= .6 else label
 
 async def jev(body, log, purpose):
     if not await limits.take_jev(): return None, {"limited":True}
@@ -186,6 +190,8 @@ async def evaluate_candidate(candidate, utterance, rolling_context, log, session
     body={"model":JEV_MODEL,"state":verdict_state,"questions":{"verdict":question}}
     verdict,vm=await jev(body,log,"fact_verdict"); answer=(verdict.get("answers") or {}).get("verdict") or {}
     probs=answer.get("probabilities") or {}; label=answer.get("choice","uncertain"); truth_prob=float(probs.get("true",0)); confidence=float(answer.get("confidence",0))
+    # A forced choice with a coin-flip probability is not a useful verdict.
+    label=calibrated_label(label,truth_prob,confidence)
     debug["jevQuestions"]={"triage":triage_body["questions"],"verdict":question}; debug["jevOutput"]={"triage":answers,"verdict":answer}; debug["timings"]["verdictMs"]=vm["timingMs"]; debug["costUsd"]=round(debug["costUsd"]+vm["costUsd"],8); debug["model"]=vm["model"]
     log.write("tool_call",tool="publish_verdict",arguments={"claim":candidate,"label":label})
     return {"claim":candidate,"truthProbability":round(truth_prob,2),"confidence":round(confidence,2),"label":label,"provider":vm["model"],"debug":debug}
@@ -313,7 +319,7 @@ async def live(ws:WebSocket):
             for call in (response.get("toolCall") or {}).get("functionCalls") or []:
                 if call.get("name")!="check_claim": continue
                 tool_calls[0]+=1; args=call.get("args") or {}
-                result=await execute_check_claim(args,latest_utterance[0],assembler.context(),ws,log,session_searches,claim_cache)
+                result=await execute_check_claim(args,assembler.current() or latest_utterance[0],assembler.context(),ws,log,session_searches,claim_cache)
                 await session.send(json.dumps({"toolResponse":{"functionResponses":[{"id":call.get("id"),"name":"check_claim","response":{"result":result}}]}}))
         async def fallback(utterance,context,call_count):
           await asyncio.sleep(1.6)

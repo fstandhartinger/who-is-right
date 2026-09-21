@@ -17,6 +17,7 @@ GLOBAL_SESSIONS_DAY = int(os.getenv("GLOBAL_SESSIONS_DAY", "100"))
 GLOBAL_JEV_CALLS_DAY = int(os.getenv("GLOBAL_JEV_CALLS_DAY", "300"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "5"))
 JEV_URL = "https://jev-router.app.mintapis.com/v1/systemone"
+JEV_API_KEY = os.getenv("JEV_API_KEY", "")
 
 SYSTEM = """You are the referee in a playful live argument fact-check party demo.
 Listen to the speakers. Emit input transcription continuously. When you hear ONE complete,
@@ -84,7 +85,7 @@ async def jev_decision(claim, context):
     if not await limits.take_jev(): return {"limited":True}
     body={"model":"classifier-fast","state":f"Claim: {claim}\nContext: {context}\nJudge only factual truth. If context is insufficient, prefer uncertain.","questions":{"verdict":{"type":"choice","instructions":"Is the claim factually true?","criteria":{"true":"The factual claim is correct.","false":"The factual claim is incorrect."}}}}
     async with httpx.AsyncClient(timeout=8) as client:
-        r=await client.post(JEV_URL,json=body); r.raise_for_status(); data=r.json()
+        r=await client.post(JEV_URL,json=body,headers={"Authorization":f"Bearer {JEV_API_KEY}"}); r.raise_for_status(); data=r.json()
     answer=(data.get("answers") or {}).get("verdict") or {}
     if isinstance(answer,str):
         label=answer; probability=.86

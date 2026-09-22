@@ -86,3 +86,16 @@ def test_coin_flip_or_low_confidence_verdict_is_uncertain():
     assert app.calibrated_label("true",.5,.25) == "uncertain"
     assert app.calibrated_label("false",.2,.45) == "uncertain"
     assert app.calibrated_label("true",.9,.85) == "true"
+
+def test_reaction_deck_uses_every_line_before_repeating_and_mentions_claim():
+    deck=app.ReactionDeck(__import__("random").Random(7))
+    count=len(app.REACTION_LINES["true"])
+    lines=[deck.line("true","Canberra is the capital of Australia") for _ in range(count)]
+    assert len(set(lines)) == count
+    assert all("Canberra" in line for line in lines)
+    assert deck.line("true","Canberra is the capital of Australia") in lines
+
+def test_reaction_deck_covers_all_verdict_types():
+    deck=app.ReactionDeck(__import__("random").Random(1))
+    for kind in ("true","false","uncertain","not_a_fact"):
+        assert "“Tea is warm”" in deck.line(kind,"Tea is warm")

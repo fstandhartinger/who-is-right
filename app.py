@@ -1,4 +1,4 @@
-import asyncio, base64, hashlib, hmac, json, os, re, time, uuid
+import asyncio, base64, hashlib, hmac, json, os, random, re, time, uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 from datetime import date
@@ -212,12 +212,64 @@ async def process_utterance(utterance, context, ws, log, session_searches):
             await ws.send_json({"type":"verdict",**{k:v for k,v in result.items() if k!="debug"}}); emitted=True
     if not emitted: await ws.send_json({"type":"no_claim","text":utterance})
 
-def comic_line(result):
-    if result.get("label")=="true": return "Ding ding — that claim survives the truth ray!"
-    if result.get("label")=="false": return "Plot twist: the facts just pulled the emergency brake!"
-    return "The evidence fog is too thick — no victory lap yet!"
+REACTION_LINES = {
+    "true": [
+        "Ding ding — {claim} survives the truth ray!",
+        "Well butter my gavel — {claim} checks out!",
+        "The facts have voted: {claim} gets a tiny crown!",
+        "No plot twist today — {claim} is standing firm!",
+        "The evidence tips its hat to {claim}!",
+        "A clean bell for {claim} — the facts approve!",
+        "{claim} has passed inspection with comic dignity!",
+        "Truth meter says yes: {claim} may take a bow!",
+    ],
+    "false": [
+        "Plot twist — {claim} just met the emergency brake!",
+        "The facts have entered and {claim} has left the building!",
+        "Tiny gavel, large objection: {claim} does not check out!",
+        "The truth meter has returned {claim} to sender!",
+        "Cue the sad trombone — {claim} misses the mark!",
+        "The evidence has pulled the rug from under {claim}!",
+        "A dramatic no for {claim} — mind the plot hole!",
+        "{claim} has been politely escorted off the factual premises!",
+    ],
+    "uncertain": [
+        "The evidence fog around {claim} is too thick for a victory lap!",
+        "The jury is still making tea over {claim}!",
+        "{claim} lands squarely in the magnificent maybe drawer!",
+        "Not enough evidence for {claim} — the gavel remains airborne!",
+        "The truth meter squints at {claim} and requests better spectacles!",
+        "{claim} gets a shrug, not a crown!",
+        "The facts are refusing to commit on {claim}!",
+        "For {claim}, the evidence has gone out for lunch!",
+    ],
+    "not_a_fact": [
+        "{claim} is a thought, not a fact the meter can referee!",
+        "No whistle today — {claim} is not a checkable claim!",
+        "The truth meter cannot measure {claim}; it left its opinion ruler at home!",
+        "{claim} belongs in the feelings lounge, not the fact ring!",
+        "A charming sentence, but {claim} gives the gavel nothing to check!",
+        "The facts decline jurisdiction over {claim}!",
+        "{claim} has wandered outside the factual playing field!",
+        "No verdict for {claim} — the meter only eats checkable facts!",
+    ],
+}
 
-async def execute_check_claim(args, utterance, context, ws, log, session_searches, claim_cache):
+def short_claim(value, words=8):
+    clean=re.sub(r"\s+"," ",str(value or "that claim")).strip(" .!?\"'“”")
+    parts=clean.split()
+    return "“"+" ".join(parts[:words])+("…" if len(parts)>words else "")+"”"
+
+class ReactionDeck:
+    def __init__(self, rng=None):
+        self.rng=rng or random.SystemRandom(); self.remaining={}
+    def line(self, kind, claim):
+        kind=kind if kind in REACTION_LINES else "uncertain"
+        if not self.remaining.get(kind):
+            self.remaining[kind]=list(REACTION_LINES[kind]); self.rng.shuffle(self.remaining[kind])
+        return self.remaining[kind].pop().format(claim=short_claim(claim))
+
+async def execute_check_claim(args, utterance, context, ws, log, session_searches, claim_cache, reactions):
     claim=re.sub(r"\s+"," ",str(args.get("claim") or "")).strip()[:500]
     hint=args.get("needs_web_check")
     log.write("gemini_tool_call",tool="check_claim",arguments={"claim":claim,"needs_web_check":hint})
@@ -229,7 +281,7 @@ async def execute_check_claim(args, utterance, context, ws, log, session_searche
         await ws.send_json({"type":"debug_trace","stage":"Duplicate tool call reused","response":response})
         return response
     if len(claim.split()) < 3:
-        result={"ignored":True,"reason":"Incomplete claim","comic_line":"That sentence needs its other half before the truth ray fires!"}
+        result={"ignored":True,"reason":"Incomplete claim"}
     else:
         try: result=await evaluate_candidate(claim,utterance or claim,context or utterance or claim,log,session_searches,hint)
         except Exception as exc:
@@ -241,13 +293,13 @@ async def execute_check_claim(args, utterance, context, ws, log, session_searche
     elif result.get("ignored"):
         if result.get("debug"): await ws.send_json({"type":"debug_claim",**result["debug"]})
         await ws.send_json({"type":"no_claim","text":claim})
-        response={"status":"ignored","reason":result.get("reason","Jev did not find a complete checkable claim."),"comic_line":result.get("comic_line","That one's a thought, not a testable fact!")}
+        response={"status":"ignored","reason":result.get("reason","Jev did not find a complete checkable claim."),"comic_line":reactions.line("not_a_fact",claim)}
     elif result.get("error"):
         await ws.send_json({"type":"error","message":result["error"]}); response=result
     else:
         await ws.send_json({"type":"debug_claim",**result["debug"]})
         await ws.send_json({"type":"verdict",**{k:v for k,v in result.items() if k!="debug"}})
-        response={k:v for k,v in result.items() if k!="debug"}; response["comic_line"]=comic_line(result)
+        response={k:v for k,v in result.items() if k!="debug"}; response["comic_line"]=reactions.line(result.get("label"),result.get("claim"))
     log.write("gemini_tool_response",tool="check_claim",response=response)
     await ws.send_json({"type":"debug_trace","stage":"Backend returned tool response","response":response})
     if cache_key: claim_cache[cache_key]=response
@@ -288,7 +340,7 @@ async def live(ws:WebSocket):
     await ws.accept(); log=DebugLog(debug_authorized(ws.cookies.get("wir_debug",""))); ip=client_ip(ws.scope); refusal=await limits.enter(ip)
     if refusal: await ws.send_json({"type":"limited","message":refusal}); await ws.close(code=4429); return
     started=time.monotonic(); assembler=UtteranceAssembler(); session_searches=[0]; queue=asyncio.Queue()
-    latest_utterance=[""]; tool_calls=[0]; fallback_tasks=[]; claim_cache={}
+    latest_utterance=[""]; tool_calls=[0]; fallback_tasks=[]; claim_cache={}; reactions=ReactionDeck()
     log.write("session_started",debug=True)
     if not os.getenv("GOOGLE_API_KEY") or not TYPESAFE_API_KEY:
         await ws.send_json({"type":"error","message":"The referee is off duty. Please try later."}); await limits.leave(); await ws.close(code=1011); return
@@ -319,7 +371,7 @@ async def live(ws:WebSocket):
             for call in (response.get("toolCall") or {}).get("functionCalls") or []:
                 if call.get("name")!="check_claim": continue
                 tool_calls[0]+=1; args=call.get("args") or {}
-                result=await execute_check_claim(args,assembler.current() or latest_utterance[0],assembler.context(),ws,log,session_searches,claim_cache)
+                result=await execute_check_claim(args,assembler.current() or latest_utterance[0],assembler.context(),ws,log,session_searches,claim_cache,reactions)
                 await session.send(json.dumps({"toolResponse":{"functionResponses":[{"id":call.get("id"),"name":"check_claim","response":{"result":result}}]}}))
         async def fallback(utterance,context,call_count):
           await asyncio.sleep(1.6)

@@ -9,13 +9,13 @@
   <section class="machine" aria-label="truth gauge">
     <div class="labels"><b>FALSE</b><b>¯\_(ツ)_/¯</b><b>TRUE</b></div>
     <div class="gauge"><div class="ticks"></div><div class="needle" id="needle"></div><div class="pin"></div></div>
-    <div class="score" id="score">READY-ish</div><div class="confidence" id="confidence">Confidence appears after a check</div>
+    <div class="score" id="score" aria-live="polite">READY-ish</div><div class="confidence" id="confidence">Confidence appears after a check</div>
   </section>
   <section class="controls">
     <button id="start"><span>🎙️</span> START LISTENING</button><button id="stop" hidden>■ STOP THE ARGUMENT</button>
     <label class="voice-toggle" for="narrator"><input id="narrator" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span><span>NARRATOR AUDIO: <b id="narrator-state">OFF</b></span></label>
     <div class="timer" id="timer">03:00 max • 3 sessions / IP / day</div>
-    <div class="status" id="status">Microphone stays off until you tap.</div>
+    <div class="status" id="status" role="status" aria-live="polite">Microphone stays off until you tap.</div>
   </section>
   <section class="tape"><b>PARTY DEMO, NOT A FACT AUTHORITY</b></section>
   <details class="debug-panel" id="debug-panel" hidden><summary>DEBUG DETAILS</summary><div id="debug-items"><p>Claims appear here with their utterance, search evidence, Jev probabilities, timing, and cost.</p></div></details>

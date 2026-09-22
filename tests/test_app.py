@@ -1,5 +1,6 @@
 import asyncio
 import app
+from pathlib import Path
 
 def test_limits_reject_fourth_session():
     old=app.SESSIONS_PER_IP_DAY
@@ -99,3 +100,11 @@ def test_reaction_deck_covers_all_verdict_types():
     deck=app.ReactionDeck(__import__("random").Random(1))
     for kind in ("true","false","uncertain","not_a_fact"):
         assert "“Tea is warm”" in deck.line(kind,"Tea is warm")
+
+def test_browser_explains_processing_and_connection_failures():
+    js=(Path(__file__).parents[1]/"public"/"app.js").read_text()
+    html=(Path(__file__).parents[1]/"public"/"index.html").read_text()
+    assert "CHECKING…" in js
+    assert "took too long to answer" in js
+    assert "Couldn’t connect to the referee" in js
+    assert html.count('aria-live="polite"') >= 2

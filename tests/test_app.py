@@ -108,3 +108,8 @@ def test_browser_explains_processing_and_connection_failures():
     assert "took too long to answer" in js
     assert "Couldn’t connect to the referee" in js
     assert html.count('aria-live="polite"') >= 2
+
+def test_page_has_a_local_favicon():
+    public=Path(__file__).parents[1]/"public"
+    assert 'href="/favicon.svg"' in (public/"index.html").read_text()
+    assert (public/"favicon.svg").read_text().startswith("<svg")

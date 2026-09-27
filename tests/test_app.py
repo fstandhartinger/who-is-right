@@ -121,7 +121,9 @@ def test_analytics_tracker_and_privacy_notice_are_present():
     counter=(public/"analytics-counter.js").read_text()
     assert 'data-website-id="bf00c485-f903-4307-ac86-497ab94a5b97"' in index
     assert 'data-domains="who-is-right.app.mintapis.com"' in index
+    assert 'data-do-not-track="true"' in index
     assert 'data-website-id="bf00c485-f903-4307-ac86-497ab94a5b97"' in privacy
+    assert 'data-do-not-track="true"' in privacy
     assert 'id="visit-counter"' in index
     assert 'href="/privacy.html"' in index
     assert 'src="/analytics-counter.js"' in index

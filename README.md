@@ -8,6 +8,12 @@ transcribes, identifies checkable claims, and calls a backend tool. One Jev
 This is entertainment, not a factual authority. Audio is processed live only;
 the application does not record or store it.
 
+The site uses self-hosted Umami analytics; see `/privacy.html` for the visitor
+notice. The footer visit counter uses a server-side proxy and requires
+`UMAMI_API_KEY` in the app's environment. Keep this key out of browser code and
+the repository. If the key is missing or the stats service is unavailable, the
+tracker can still collect pageviews and the counter stays hidden.
+
 ## Run
 
 ```bash

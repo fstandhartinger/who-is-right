@@ -28,6 +28,11 @@ DEBUG_DIR = Path(os.getenv("DEBUG_LOG_DIR", "/tmp/who-is-right-debug"))
 TYPESAFE_API_KEY = os.getenv("TYPESAFE_API_KEY", "")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "") or os.getenv("SERPER_DEV_API_KEY", "")
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
+UMAMI_BASE_URL = "https://bh-analytics.app.mintapis.com"
+UMAMI_WEBSITE_ID = "bf00c485-f903-4307-ac86-497ab94a5b97"
+UMAMI_API_KEY = os.getenv("UMAMI_API_KEY", "")
+_analytics_cache = {"visits": None, "expires_at": 0.0, "retry_after": 0.0}
+_analytics_lock = asyncio.Lock()
 
 LIVE_SYSTEM = """You are the referee in a playful live argument fact-check demo.
 Listen continuously and transcribe faithfully. Wait for a complete statement across audio chunks.
@@ -326,6 +331,39 @@ async def index(): return FileResponse(PUBLIC/"index.html")
 async def js(): return FileResponse(PUBLIC/"app.js",media_type="text/javascript")
 @app.get("/style.css")
 async def css(): return FileResponse(PUBLIC/"style.css",media_type="text/css")
+
+@app.get("/api/analytics/visits")
+async def analytics_visits():
+    if not UMAMI_API_KEY:
+        return JSONResponse({"detail":"analytics unavailable"},503)
+    now=time.monotonic()
+    if _analytics_cache["visits"] is not None and _analytics_cache["expires_at"] > now:
+        return {"visits":_analytics_cache["visits"]}
+    if _analytics_cache["retry_after"] > now:
+        return JSONResponse({"detail":"analytics unavailable"},503)
+    async with _analytics_lock:
+        now=time.monotonic()
+        if _analytics_cache["visits"] is not None and _analytics_cache["expires_at"] > now:
+            return {"visits":_analytics_cache["visits"]}
+        if _analytics_cache["retry_after"] > now:
+            return JSONResponse({"detail":"analytics unavailable"},503)
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response=await client.get(
+                    f"{UMAMI_BASE_URL}/api/websites/{UMAMI_WEBSITE_ID}/stats",
+                    params={"startAt":0,"endAt":now_ms()},
+                    headers={"Authorization":f"Bearer {UMAMI_API_KEY}"},
+                )
+                response.raise_for_status()
+                data=response.json()
+            visits=data.get("visits") if isinstance(data,dict) else None
+            if type(visits) is not int or visits < 0:
+                raise ValueError("invalid Umami visits total")
+        except (httpx.HTTPError,ValueError,TypeError):
+            _analytics_cache["retry_after"]=time.monotonic()+60
+            return JSONResponse({"detail":"analytics unavailable"},503)
+        _analytics_cache.update(visits=visits,expires_at=time.monotonic()+300,retry_after=0.0)
+        return {"visits":visits}
 
 @app.get("/api/debug/logs")
 async def debug_logs(request:Request):

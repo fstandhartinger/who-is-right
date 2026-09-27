@@ -113,3 +113,40 @@ def test_page_has_a_local_favicon():
     public=Path(__file__).parents[1]/"public"
     assert 'href="/favicon.svg"' in (public/"index.html").read_text()
     assert (public/"favicon.svg").read_text().startswith("<svg")
+
+def test_analytics_tracker_and_privacy_notice_are_present():
+    public=Path(__file__).parents[1]/"public"
+    index=(public/"index.html").read_text()
+    privacy=(public/"privacy.html").read_text()
+    counter=(public/"analytics-counter.js").read_text()
+    assert 'data-website-id="bf00c485-f903-4307-ac86-497ab94a5b97"' in index
+    assert 'data-domains="who-is-right.app.mintapis.com"' in index
+    assert 'data-website-id="bf00c485-f903-4307-ac86-497ab94a5b97"' in privacy
+    assert 'id="visit-counter"' in index
+    assert 'href="/privacy.html"' in index
+    assert 'src="/analytics-counter.js"' in index
+    assert 'fetch("/api/analytics/visits"' in counter
+    assert 'counter.textContent' in counter
+    assert "self-hosted, cookieless analytics tool on servers in Germany" in privacy
+    assert "processes the visitor’s IP address and browser details" in privacy
+    assert "no personal data is stored" not in privacy.lower()
+
+def test_analytics_visits_proxy_uses_fixed_site_and_returns_only_count(monkeypatch):
+    requests=[]
+    class FakeResponse:
+        def raise_for_status(self): pass
+        def json(self): return {"visits":42,"pageviews":99,"secret":"must not escape"}
+    class FakeClient:
+        def __init__(self,timeout): assert timeout == 3.0
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def get(self,url,params,headers):
+            requests.append((url,params,headers))
+            return FakeResponse()
+    monkeypatch.setattr(app,"UMAMI_API_KEY","test-key")
+    monkeypatch.setattr(app.httpx,"AsyncClient",FakeClient)
+    app._analytics_cache.update(visits=None,expires_at=0.0,retry_after=0.0)
+    result=asyncio.run(app.analytics_visits())
+    assert result == {"visits":42}
+    assert requests[0][0] == "https://bh-analytics.app.mintapis.com/api/websites/bf00c485-f903-4307-ac86-497ab94a5b97/stats"
+    assert requests[0][2] == {"Authorization":"Bearer test-key"}

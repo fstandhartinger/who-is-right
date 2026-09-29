@@ -5,12 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080
 
 WORKDIR /srv/live-fact-check
-COPY requirements.txt ./requirements.txt
+COPY live-fact-check/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
 
-COPY app.py model.py smoother.py ./
-COPY public ./public
+COPY live-fact-check/app.py live-fact-check/model.py live-fact-check/smoother.py ./
+COPY live-fact-check/public ./public
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

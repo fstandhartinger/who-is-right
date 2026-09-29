@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import model as M
 from smoother import Smoother
 
-MODEL = os.getenv("MODEL", "gemini-3.5-flash-lite")
+MODEL = os.getenv("MODEL", "gemini-3.1-flash-lite")
 THINKING = os.getenv("THINKING_LEVEL", "minimal")
 SR = 16000
 WINDOW_S = float(os.getenv("WINDOW_S", "3.0"))

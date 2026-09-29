@@ -48,13 +48,13 @@
         <div class="ctl-title" id="ctlTitle">Use your microphone</div>
         <div class="ctl-sub" id="ctlSub">or <button class="link" id="sampleBtn">play a sample ▸</button> — no mic needed</div>
       </div>
-      <div class="timer" id="timer"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.5" class="track"/><circle cx="18" cy="18" r="15.5" class="prog" id="timerProg"/></svg><span id="timerTxt">90s</span></div>
+      <div class="timer" id="timer"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.5" class="track"/><circle cx="18" cy="18" r="15.5" class="prog" id="timerProg"/></svg><span id="timerTxt">60s</span></div>
     </div>
   </section>
 
   <section class="panel timeline-panel">
     <div class="panel-head">
-      <div><span class="ph-title">The rolling verdict</span><span class="ph-sub" id="phSub">one mark per 200 ms tick · color = one model label</span></div>
+      <div><span class="ph-title">The rolling verdict</span><span class="ph-sub" id="phSub">one mark per 200 ms tick · color = label · height = recent agreement</span></div>
       <div class="legend"><span><b class="dot a"></b>true</span><span><b class="dot b"></b>false</span><span><b class="dot c"></b>not a claim</span><span><b class="dot p"></b>in flight</span><span><b class="dot s"></b>silence (skipped)</span></div>
     </div>
     <canvas id="timeline" aria-label="Live timeline of model decisions"></canvas>
@@ -64,7 +64,7 @@
     <div class="stat"><div class="s-k">Model latency p50</div><div class="s-v"><span id="p50">–</span><small>ms</small></div></div>
     <div class="stat"><div class="s-k">Last call</div><div class="s-v"><span id="last">–</span><small>ms</small></div></div>
     <div class="stat"><div class="s-k">Requests / s</div><div class="s-v"><span id="rps">0.0</span></div></div>
-    <div class="stat"><div class="s-k">In flight</div><div class="s-v"><span id="inflight">0</span><small>/ 8</small></div></div>
+    <div class="stat"><div class="s-k">In flight</div><div class="s-v"><span id="inflight">0</span><small>/ 12</small></div></div>
   </section>
 
   <section class="samples">
@@ -86,7 +86,7 @@
 </main>
 
 <footer class="foot">
-  <p>Powered by <b id="modelName">gemini-3.1-flash-lite</b> — chosen from <a href="https://benchmarkheaven.com/audio-jev-bench" target="_blank" rel="noopener">AudioJevBench</a>.</p>
+  <p>Powered by <b id="modelName">gemini-3.5-flash-lite</b> — chosen from <a href="https://benchmarkheaven.com/audio-jev-bench" target="_blank" rel="noopener">AudioJevBench</a>.</p>
   <p class="disc">A live demo, not a fact authority. It can be wrong. Audio streams to Google Gemini; Live Fact Check does not save it. Sessions are capped at 60 seconds.</p>
 </footer>
 <script src="/app.js" type="module"></script>

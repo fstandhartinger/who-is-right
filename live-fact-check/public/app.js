@@ -52,7 +52,8 @@ function setBusy(active) {
   $('mic').classList.toggle('on', active && mode === 'mic');
   $('mic').setAttribute('aria-label', active && mode === 'mic' ? 'Stop microphone' : 'Start microphone');
   $('timer').classList.toggle('on', active);
-  $('sampleBtn').disabled = active;
+  const existingSampleButton = $('sampleBtn');
+  if (existingSampleButton) existingSampleButton.disabled = active;
   document.querySelectorAll('.chip').forEach((button) => { button.disabled = active; });
   $('ctlTitle').textContent = active ? (mode === 'sample' ? 'Playing spoken sample' : 'Listening live') : 'Use your microphone';
   $('ctlSub').innerHTML = active ? 'Tap the mic to stop · each request is capped to the latest 3 seconds' : 'or <button class="link" id="sampleBtn">play a sample ▸</button> — no mic needed';

@@ -1,6 +1,6 @@
 """Live Fact Check — streams 16 kHz mono PCM from the browser, classifies the last 3 s every 200 ms.
 
-Every tick (TICK_MS) the server sends the latest WINDOW_S seconds as WAV to the Gemini API IF the window
+Every tick (TICK_MS) the server sends the latest WINDOW_S seconds as WAV to OpenRouter IF the window
 contains voice (RMS gate) and fewer than MAX_INFLIGHT requests are open for this session. Results go back
 to the browser together with a server-side smoothed verdict (EMA + hysteresis, see smoother.py), so the
 UI and the eval harness see exactly the same verdict. Audio is never written to disk.
@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import model as M
 from smoother import Smoother
 
-MODEL = os.getenv("MODEL", "gemini-3.1-flash-lite")
+MODEL = os.getenv("MODEL", "google/gemini-3.1-flash-lite")
 THINKING = os.getenv("THINKING_LEVEL", "minimal")
 SR = 16000
 WINDOW_S = float(os.getenv("WINDOW_S", "3.0"))
@@ -27,6 +27,7 @@ TICK_MS = int(os.getenv("TICK_MS", "200"))
 MAX_INFLIGHT = int(os.getenv("MAX_INFLIGHT", "12"))
 MAX_FRAME_BYTES = int(os.getenv("MAX_FRAME_BYTES", "64000"))
 SESSION_SECONDS = int(os.getenv("SESSION_SECONDS", "60"))
+SESSION_CALLS_MAX = int(os.getenv("SESSION_CALLS_MAX", "150"))
 IDLE_SECONDS = int(os.getenv("IDLE_SECONDS", "25"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))
 SESSIONS_PER_IP_DAY = int(os.getenv("SESSIONS_PER_IP_DAY", "3"))
@@ -79,6 +80,10 @@ limits = Limits()
 client: httpx.AsyncClient | None = None
 
 
+def has_provider_key():
+    return bool(os.getenv("OPENROUTER_API_KEY") or os.getenv("OPEN_ROUTER_API_KEY"))
+
+
 @asynccontextmanager
 async def lifespan(app):
     global client
@@ -99,15 +104,15 @@ def client_ip(scope):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "model": MODEL, "key": bool(os.getenv("GOOGLE_API_KEY")), "active": limits.active,
+    return {"ok": True, "model": MODEL, "key": has_provider_key(), "active": limits.active,
             "calls_today": limits.calls, "calls_cap": GLOBAL_CALLS_DAY}
 
 
 @app.get("/api/config")
 async def config():
     samples = json.loads((PUBLIC / "samples" / "samples.json").read_text())
-    return {"model": MODEL, "sessionSeconds": SESSION_SECONDS, "sessionsPerIpDay": SESSIONS_PER_IP_DAY,
-            "tickMs": TICK_MS, "windowS": WINDOW_S, "samples": samples,
+    return {"model": MODEL, "sessionSeconds": SESSION_SECONDS, "sessionCallsMax": SESSION_CALLS_MAX,
+            "sessionsPerIpDay": SESSIONS_PER_IP_DAY, "tickMs": TICK_MS, "windowS": WINDOW_S, "samples": samples,
             "benchmarkUrl": "https://benchmarkheaven.com/audio-jev-bench"}
 
 
@@ -186,6 +191,10 @@ class Session:
                 await self.send({"type": "ended", "reason": "time",
                                  "message": f"That's {SESSION_SECONDS} seconds of listening — the maximum per session."})
                 return
+            if self.calls >= SESSION_CALLS_MAX:
+                await self.send({"type": "ended", "reason": "call_limit",
+                                 "message": f"That's {SESSION_CALLS_MAX} checks — the maximum per session."})
+                return
             self.tick += 1
             tick, t_end, pcm = self.tick, self.t, bytes(self.buf)
             if len(pcm) < int(WINDOW_S * SR) * 2:
@@ -214,7 +223,7 @@ async def ws_endpoint(ws: WebSocket):
     ip = client_ip(ws.scope)
     tok = ws.query_params.get("key", "")
     privileged = bool(EVAL_TOKEN) and hmac.compare_digest(tok, EVAL_TOKEN)
-    if not os.getenv("GOOGLE_API_KEY"):
+    if not has_provider_key():
         await ws.send_json({"type": "error", "message": "The fact checker is off duty. Please try later."})
         await ws.close(code=1011); return
     refusal = await limits.enter(ip, privileged)
@@ -223,7 +232,8 @@ async def ws_endpoint(ws: WebSocket):
         await ws.send_json({"type": "limited", "reason": reason, "message": message})
         await ws.close(code=4429); return
     s = Session(ws)
-    await ws.send_json({"type": "ready", "model": MODEL, "seconds": SESSION_SECONDS, "tickMs": TICK_MS, "windowS": WINDOW_S})
+    await ws.send_json({"type": "ready", "model": MODEL, "seconds": SESSION_SECONDS,
+                        "callsMax": SESSION_CALLS_MAX, "tickMs": TICK_MS, "windowS": WINDOW_S})
     ticker = asyncio.create_task(s.ticker())
     log.info("session start active=%d calls_today=%d", limits.active, limits.calls)
     try:

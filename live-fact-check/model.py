@@ -1,4 +1,4 @@
-"""Gemini audio call: send a three-second WAV and accept exactly one A/B/C label."""
+"""OpenRouter audio call: send a three-second WAV and accept exactly one A/B/C label."""
 import base64
 import io
 import json
@@ -8,7 +8,7 @@ import wave
 
 import httpx
 
-URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+URL = "https://openrouter.ai/api/v1/chat/completions"
 
 PROMPT = """You are a live audio fact-check labeler. You receive the latest 3 seconds of a spoken audio stream.
 Judge only the latest complete spoken statement that can be understood from the audio.
@@ -49,32 +49,50 @@ def parse(raw: str) -> str:
 
 async def classify(client: httpx.AsyncClient, pcm: bytes, model: str,
                    thinking: str = "minimal", timeout: float = 8.0):
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPEN_ROUTER_API_KEY", "")
     body = {
-        "systemInstruction": {"parts": [{"text": PROMPT}]},
-        "contents": [{"role": "user", "parts": [
-            {"text": "Classify the latest complete statement in this audio. Return only A, B, or C."},
-            {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(pcm_to_wav(pcm)).decode()}},
-        ]}],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": 64,
-            "responseMimeType": "application/json",
-            "responseSchema": {"type": "OBJECT", "properties": {"label": {"type": "STRING", "enum": ["A", "B", "C"]}}, "required": ["label"], "propertyOrdering": ["label"]},
-            "thinkingConfig": {"thinkingLevel": thinking},
+        "model": model,
+        "messages": [
+            {"role": "system", "content": PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Classify the latest complete statement in this audio. Return only A, B, or C."},
+                {"type": "input_audio", "input_audio": {
+                    "data": base64.b64encode(pcm_to_wav(pcm)).decode(), "format": "wav"
+                }},
+            ]},
+        ],
+        "temperature": 0,
+        "max_tokens": 64,
+        "reasoning": {"effort": thinking},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "verdict",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string", "enum": ["A", "B", "C"]}},
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+            },
         },
     }
     t0 = time.perf_counter()
-    r = await client.post(URL.format(model=model), json=body, timeout=timeout,
-                          headers={"x-goog-api-key": os.environ.get("GOOGLE_API_KEY", "")})
+    r = await client.post(URL, json=body, timeout=timeout, headers={
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://benchmarkheaven.com/audio-jev-bench",
+        "X-Title": "Live Fact Check",
+    })
     dt = (time.perf_counter() - t0) * 1000
     if r.status_code != 200:
         raise RuntimeError(f"http_{r.status_code}: {r.text[:200]}")
     js = r.json()
-    parts = ((js.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
-    raw = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    choices = js.get("choices") or []
+    raw = ((choices[0].get("message") or {}).get("content") or "") if choices else ""
     label = parse(raw)
-    usage = js.get("usageMetadata") or {}
+    usage = js.get("usage") or {}
     return {"label": label, "latency_ms": round(dt), "usage": {
-        "in": usage.get("promptTokenCount"),
-        "out": (usage.get("candidatesTokenCount") or 0) + (usage.get("thoughtsTokenCount") or 0),
+        "in": usage.get("prompt_tokens"),
+        "out": usage.get("completion_tokens"),
     }}

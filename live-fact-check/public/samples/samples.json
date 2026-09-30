@@ -1,0 +1,50 @@
+[
+  {
+    "id": "t01",
+    "label": "A",
+    "text": "The Eiffel Tower is in Paris.",
+    "duration_s": 3.4
+  },
+  {
+    "id": "t02",
+    "label": "A",
+    "text": "Water boils at one hundred degrees Celsius at sea level.",
+    "duration_s": 3.651
+  },
+  {
+    "id": "t07",
+    "label": "A",
+    "text": "Tokyo is the capital of Japan.",
+    "duration_s": 3.4
+  },
+  {
+    "id": "f01",
+    "label": "B",
+    "text": "The Great Wall of China is visible from the Moon with the naked eye.",
+    "duration_s": 4.115
+  },
+  {
+    "id": "f02",
+    "label": "B",
+    "text": "The Sun revolves around the Earth.",
+    "duration_s": 3.4
+  },
+  {
+    "id": "f10",
+    "label": "B",
+    "text": "Goldfish have a memory of only three seconds.",
+    "duration_s": 3.4
+  },
+  {
+    "id": "c01",
+    "label": "C",
+    "text": "Hi there, how are you doing today?",
+    "duration_s": 3.4
+  },
+  {
+    "id": "c03",
+    "label": "C",
+    "text": "I think pineapple on pizza is delicious.",
+    "duration_s": 3.4
+  }
+]

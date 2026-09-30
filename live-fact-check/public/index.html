@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live Fact Check — audio decisions, live</title>
+<meta name="description" content="Speak a sentence. An audio model judges the last 3 seconds five times per second: true, false, or not a claim. The AudioJevBench showcase demo.">
+<meta name="theme-color" content="#07080b">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='9' fill='%2334d399'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="bg"></div>
+<header class="top">
+  <div class="brand"><span class="mark"><i></i></span><span>Live Fact Check</span></div>
+  <a class="pill" href="https://benchmarkheaven.com/audio-jev-bench" target="_blank" rel="noopener">AudioJevBench showcase <span aria-hidden="true">↗</span></a>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="kicker"><span class="live-dot" id="liveDot"></span><span id="kicker">AudioJevBench · live audio demo</span></p>
+    <h1 class="hero-title">Three seconds in.<br><span>One label out.</span></h1>
+    <p class="hero-copy">Speak naturally. A decision model listens to the rolling audio window and answers A, B, or C — about five times a second.</p>
+
+    <div class="verdict" id="verdict" data-v="idle">
+      <div class="v-label" id="v-label">Live verdict</div>
+      <div class="v-word" id="vword">READY</div>
+    <div class="v-claim" id="vclaim">Tap the mic or play a spoken sample. Each check hears a rolling 3-second window.</div>
+      <div class="probs" id="probs" aria-label="Recent distribution of model labels">
+        <div class="s-k">Recent label agreement <small>share of recent A / B / C calls</small></div>
+        <div class="pbar"><i class="pa" id="pa"></i><i class="pb" id="pb"></i><i class="pc" id="pc"></i></div>
+        <div class="plegend">
+          <span><b class="dot a"></b>A · True <em id="pat">–</em></span>
+          <span><b class="dot b"></b>B · False <em id="pbt">–</em></span>
+          <span><b class="dot c"></b>C · Not a claim <em id="pct">–</em></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="mic" id="mic" aria-label="Start microphone">
+        <span class="ring"></span>
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.93V20h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.07A7 7 0 0 1 5 11a1 1 0 1 1 2 0 5 5 0 0 0 10 0Z"/></svg>
+      </button>
+      <div class="ctl-text">
+        <div class="ctl-title" id="ctlTitle">Use your microphone</div>
+        <div class="ctl-sub" id="ctlSub">or <button class="link" id="sampleBtn">play a sample ▸</button> — no mic needed</div>
+      </div>
+      <div class="timer" id="timer"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.5" class="track"/><circle cx="18" cy="18" r="15.5" class="prog" id="timerProg"/></svg><span id="timerTxt">60s</span></div>
+    </div>
+  </section>
+
+  <section class="panel timeline-panel">
+    <div class="panel-head">
+      <div><span class="ph-title">The rolling verdict</span><span class="ph-sub" id="phSub">one mark per 200 ms tick · color = label · height = recent agreement</span></div>
+      <div class="legend"><span><b class="dot a"></b>true</span><span><b class="dot b"></b>false</span><span><b class="dot c"></b>not a claim</span><span><b class="dot p"></b>in flight</span><span><b class="dot s"></b>silence (skipped)</span></div>
+    </div>
+    <canvas id="timeline" aria-label="Live timeline of model decisions"></canvas>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><div class="s-k">Model latency p50</div><div class="s-v"><span id="p50">–</span><small>ms</small></div></div>
+    <div class="stat"><div class="s-k">Last call</div><div class="s-v"><span id="last">–</span><small>ms</small></div></div>
+    <div class="stat"><div class="s-k">Requests / s</div><div class="s-v"><span id="rps">0.0</span></div></div>
+    <div class="stat"><div class="s-k">In flight</div><div class="s-v"><span id="inflight">0</span><small>/ 12</small></div></div>
+  </section>
+
+  <section class="samples">
+    <div class="samples-head">Samples <span>— played through your speakers and fed into the exact same pipeline</span></div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <div class="limit" id="limit" hidden>
+    <div class="limit-card">
+      <div class="limit-emoji" aria-hidden="true">☾</div>
+      <h2 id="limitTitle">Come back tomorrow</h2>
+      <p id="limitMsg">Today's fact-checking budget is used up.</p>
+      <button class="btn" id="limitClose">Okay</button>
+    </div>
+  </div>
+  <div class="limit" id="startOverlay" hidden>
+    <div class="limit-card"><h2>Start the demo</h2><p>Your browser wants a click before it plays audio.</p><button class="btn" id="startDemo">Play demo ▸</button></div>
+  </div>
+</main>
+
+<footer class="foot">
+  <p>Powered by <b id="modelName">google/gemini-3.1-flash-lite</b> via OpenRouter — chosen from <a href="https://benchmarkheaven.com/audio-jev-bench" target="_blank" rel="noopener">AudioJevBench</a>.</p>
+  <p class="disc">A live demo, not a fact authority. It can be wrong. Audio is sent to Google Gemini via OpenRouter; Live Fact Check does not save it. Sessions are capped at 60 seconds or 150 checks.</p>
+</footer>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
